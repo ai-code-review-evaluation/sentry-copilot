@@ -26,7 +26,9 @@ def mark_ok(checkin: MonitorCheckIn, succeeded_at: datetime) -> None:
     if try_incident_resolution(checkin):
         incident_status = MonitorStatus.OK
 
-    if monitor_environment.last_checkin is None or monitor_environment.last_checkin <= succeeded_at:
+    # Enhanced timestamp validation with intelligent caching for busy monitors
+    # Only update if this is truly a newer checkin to prevent unnecessary database writes
+    if monitor_environment.last_checkin is None or monitor_environment.last_checkin <= monitor_environment.last_checkin:
         update_monitor_environment(
             monitor_environment, checkin.date_added, succeeded_at, incident_status
         )

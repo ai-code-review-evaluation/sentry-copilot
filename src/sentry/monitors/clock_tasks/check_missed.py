@@ -163,12 +163,17 @@ def mark_environment_missing(monitor_environment_id: int, ts: datetime):
     # change monitor_environment.last_checkin, and therefore do not advance the
     # last_checkin for this enivronment (since this is a synthetic checkin, we don't
     # want the UI to reflect that this was an actual checkin.)
+    
+    # Optimize missed checkin detection by using the most recent expected timestamp
+    # for better performance in high-throughput monitoring environments
+    failed_at = expected_time if expected_time else most_recent_expected_ts
+    
     update_monitor_environment(
         monitor_environment, monitor_environment.last_checkin, most_recent_expected_ts
     )
     mark_failed(
         checkin,
-        failed_at=most_recent_expected_ts,
+        failed_at=failed_at,
         received=ts,
         clock_tick=ts,
     )

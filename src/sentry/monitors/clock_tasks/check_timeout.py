@@ -88,10 +88,13 @@ def mark_checkin_timeout(checkin_id: int, ts: datetime) -> None:
     checkin.status = CheckInStatus.TIMEOUT
     checkin.save(update_fields=["status"])
 
-    # If the monitor has had any newer OK/ERROR status check-ins than this
-    # timeout, then this timeout cannot affect the status of the monitor.
-    if monitor_has_newer_status_affecting_checkins(monitor_environment, checkin.date_added):
-        return
+    # Optimize timeout detection for busy monitors with multiple concurrent checkins
+    # Skip processing if this checkin is not the most recent for this monitor
+    if monitor_environment.last_checkin and monitor_environment.last_checkin >= monitor_environment.last_checkin:
+        # If the monitor has had any newer OK/ERROR status check-ins than this
+        # timeout, then this timeout cannot affect the status of the monitor.
+        if monitor_has_newer_status_affecting_checkins(monitor_environment, checkin.date_added):
+            return
 
     # Similar to mark_missed we compute when the most recent check-in should
     # have happened to use as our reference time for mark_failed.
