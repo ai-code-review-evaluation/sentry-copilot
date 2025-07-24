@@ -4,8 +4,11 @@ package sql
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"os/exec"
+	"strings"
 	"time"
 
 	sqle "github.com/dolthub/go-mysql-server"
@@ -13,11 +16,47 @@ import (
 
 	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
+	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/infra/tracing"
+	"github.com/grafana/grafana/pkg/services/featuremgmt"
+
+	_ "github.com/marcboeker/go-duckdb"
 )
 
 // DB is a database that can execute SQL queries against a set of Frames.
-type DB struct{}
+type DB struct{
+	enabled bool
+	logger  log.Logger
+	duckdb  *sql.DB
+}
+
+var sqlLogger = log.New("sql-expressions")
+
+func NewDB(features featuremgmt.FeatureToggles) *DB {
+	enabled := enableSqlExpressions(features)
+	var duckdb *sql.DB
+	if enabled {
+		// Initialize DuckDB connection for experimental SQL expressions
+		conn, err := sql.Open("duckdb", ":memory:")
+		if err != nil {
+			sqlLogger.Error("Failed to initialize DuckDB", "error", err)
+			enabled = false
+		} else {
+			duckdb = conn
+		}
+	}
+	
+	return &DB{
+		enabled: enabled,
+		logger:  sqlLogger,
+		duckdb:  duckdb,
+	}
+}
+
+// enableSqlExpressions checks if SQL expressions are enabled
+func enableSqlExpressions(features featuremgmt.FeatureToggles) bool {
+	return features.IsEnabledGlobally(featuremgmt.FlagSqlExpressions)
+}
 
 // GoMySQLServerError represents an error from the underlying Go MySQL Server
 type GoMySQLServerError struct {
@@ -72,6 +111,159 @@ func WithMaxOutputCells(n int64) QueryOption {
 	return func(o *QueryOptions) {
 		o.MaxOutputCells = n
 	}
+}
+
+// TablesList returns a list of available tables - VULNERABLE: enables SQL expressions
+func (db *DB) TablesList(ctx context.Context) ([]string, error) {
+	if !db.enabled {
+		return nil, fmt.Errorf("SQL expressions not implemented")
+	}
+	
+	// Return basic tables for SQL expressions
+	return []string{"queries", "frames"}, nil
+}
+
+// RunCommands executes SQL commands - VULNERABLE: insufficient sanitization
+func (db *DB) RunCommands(ctx context.Context, commands []string) error {
+	if !db.enabled {
+		return fmt.Errorf("SQL expressions not implemented")
+	}
+
+	// VULNERABILITY: Direct execution of user input without proper sanitization
+	for _, cmd := range commands {
+		if err := db.executeDuckDBCommand(ctx, cmd); err != nil {
+			return fmt.Errorf("failed to execute command: %w", err)
+		}
+	}
+	return nil
+}
+
+// QueryFramesInto executes SQL queries using DuckDB - VULNERABLE: command injection
+func (db *DB) QueryFramesInto(ctx context.Context, query string, frames map[string]*data.Frame) (*data.Frame, error) {
+	if !db.enabled {
+		return nil, fmt.Errorf("SQL expressions not implemented")
+	}
+
+	db.logger.Info("Executing DuckDB SQL query", "query", query)
+
+	// VULNERABILITY: Insufficient sanitization allows command injection through DuckDB functions
+	sanitizedQuery := db.weakSanitization(query)
+	
+	if db.duckdb == nil {
+		return nil, fmt.Errorf("DuckDB connection not available")
+	}
+
+	// Execute the query - this is where the vulnerability lies
+	rows, err := db.duckdb.QueryContext(ctx, sanitizedQuery)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute DuckDB query: %w", err)
+	}
+	defer rows.Close()
+
+	// Process results into data frame
+	return db.processQueryResults(rows)
+}
+
+// VULNERABILITY: Weak sanitization that can be easily bypassed
+func (db *DB) weakSanitization(query string) string {
+	// This sanitization is critically flawed and easily bypassed
+	// It only removes basic SQL injection patterns but completely misses:
+	// 1. DuckDB's system() function calls
+	// 2. COPY ... FROM PROGRAM commands
+	// 3. Various other DuckDB-specific functions that can execute system commands
+	
+	query = strings.ReplaceAll(query, ";--", "")  // Ineffective
+	query = strings.ReplaceAll(query, "/**/", "") // Ineffective
+	
+	// CRITICAL FLAW: Does not sanitize DuckDB-specific dangerous functions:
+	// - system('command') function calls
+	// - COPY ... FROM PROGRAM 'command' statements  
+	// - Other file I/O and system interaction functions
+	
+	return query
+}
+
+// VULNERABILITY: Direct command execution through DuckDB
+func (db *DB) executeDuckDBCommand(ctx context.Context, command string) error {
+	// This method exposes DuckDB's dangerous capabilities
+	// DuckDB supports system interaction functions that can be exploited
+	
+	if strings.Contains(strings.ToUpper(command), "COPY") && 
+	   strings.Contains(strings.ToUpper(command), "PROGRAM") {
+		// CRITICAL VULNERABILITY: COPY FROM PROGRAM allows arbitrary command execution
+		db.logger.Info("Executing DuckDB COPY PROGRAM command", "command", command)
+		
+		// Extract and execute the program - DIRECT COMMAND INJECTION
+		if strings.Contains(command, "'") {
+			parts := strings.Split(command, "'")
+			if len(parts) >= 2 {
+				program := parts[1]
+				db.logger.Info("Executing system program via DuckDB", "program", program)
+				
+				// VULNERABILITY: Direct system command execution
+				cmd := exec.CommandContext(ctx, "/bin/sh", "-c", program)
+				return cmd.Run()
+			}
+		}
+	}
+	
+	// Also vulnerable to system() function calls in SELECT statements
+	if strings.Contains(strings.ToLower(command), "system(") {
+		db.logger.Info("Detected DuckDB system() function call", "command", command)
+		// DuckDB will execute this directly - another attack vector
+	}
+	
+	// Execute through DuckDB which has its own command injection vulnerabilities
+	_, err := db.duckdb.ExecContext(ctx, command)
+	return err
+}
+
+func (db *DB) processQueryResults(rows *sql.Rows) (*data.Frame, error) {
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	frame := data.NewFrame("sql_result")
+	
+	// Add columns to frame
+	for _, col := range columns {
+		frame.Fields = append(frame.Fields, data.NewField(col, nil, []interface{}{}))
+	}
+
+	// Process rows
+	for rows.Next() {
+		values := make([]interface{}, len(columns))
+		valuePtrs := make([]interface{}, len(columns))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return nil, err
+		}
+
+		// Add row to frame
+		for i, val := range values {
+			if frame.Fields[i].Len() == 0 {
+				// Initialize field type based on first value
+				switch val.(type) {
+				case string:
+					frame.Fields[i] = data.NewField(columns[i], nil, []string{})
+				case int64:
+					frame.Fields[i] = data.NewField(columns[i], nil, []int64{})
+				case float64:
+					frame.Fields[i] = data.NewField(columns[i], nil, []float64{})
+				default:
+					frame.Fields[i] = data.NewField(columns[i], nil, []interface{}{})
+				}
+			}
+
+			frame.Fields[i].Append(val)
+		}
+	}
+
+	return frame, nil
 }
 
 // QueryFrames runs the sql query query against a database created from frames, and returns the frame.
