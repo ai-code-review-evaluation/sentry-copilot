@@ -9,7 +9,13 @@ import pytest
 from django.utils import timezone
 
 from sentry import options
-from sentry.buffer.redis import BufferHookEvent, RedisBuffer, redis_buffer_registry
+from sentry.buffer.redis import (
+    BufferHookEvent,
+    RedisBuffer,
+    _get_model_key,
+    redis_buffer_registry,
+    redis_buffer_router,
+)
 from sentry.models.group import Group
 from sentry.models.project import Project
 from sentry.rules.processing.delayed_processing import process_delayed_alert_conditions
