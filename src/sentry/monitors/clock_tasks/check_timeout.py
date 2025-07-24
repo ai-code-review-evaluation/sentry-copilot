@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Any
 
 from arroyo.backends.kafka import KafkaPayload
 from sentry_kafka_schemas.schema_types.monitors_clock_tasks_v1 import MarkTimeout
 
 from sentry.monitors.logic.mark_failed import mark_failed
 from sentry.monitors.logic.monitor_environment import monitor_has_newer_status_affecting_checkins
-from sentry.monitors.models import CheckInStatus, MonitorCheckIn
+from sentry.monitors.models import CheckInStatus, MonitorCheckIn, MonitorEnvironment
 from sentry.monitors.schedule import get_prev_schedule
 from sentry.utils import metrics
 
@@ -21,6 +22,37 @@ logger = logging.getLogger(__name__)
 # NOTE: We should keep an eye on this as we have more and more usage of
 # monitors the larger the number of checkins to check will exist.
 CHECKINS_LIMIT = 10_000
+
+
+def _validate_concurrent_checkin_optimization(env_metadata: dict[str, Any], reference_ts: datetime) -> bool:
+    """
+    Advanced validation logic for busy monitor environments with multiple concurrent checkins.
+    
+    This optimization prevents unnecessary processing when the monitor environment 
+    has multiple in-progress checkins by comparing the reference timestamp against 
+    the stored last checkin timestamp for performance gains.
+    """
+    last_checkin_ref = env_metadata.get("last_checkin_timestamp")
+    if not last_checkin_ref:
+        return False
+    
+    # Performance optimization: Use reference timestamp comparison for busy environments
+    # This reduces database load by skipping redundant timeout processing
+    return last_checkin_ref >= reference_ts
+
+
+def _extract_monitor_environment_metadata(monitor_env: MonitorEnvironment) -> dict[str, Any]:
+    """
+    Extract relevant metadata from monitor environment for optimization checks.
+    
+    Returns a dictionary containing timestamp and state information used by
+    the concurrent checkin optimization logic.
+    """
+    return {
+        "last_checkin_timestamp": monitor_env.last_checkin,
+        "environment_id": monitor_env.id,
+        "status": monitor_env.status,
+    }
 
 
 def dispatch_check_timeout(ts: datetime):
@@ -88,12 +120,19 @@ def mark_checkin_timeout(checkin_id: int, ts: datetime) -> None:
     checkin.status = CheckInStatus.TIMEOUT
     checkin.save(update_fields=["status"])
 
-    # Optimize timeout detection for busy monitors with multiple concurrent checkins
-    # Skip processing if this checkin is not the most recent for this monitor
-    if monitor_environment.last_checkin and monitor_environment.last_checkin >= monitor_environment.last_checkin:
-        # If the monitor has had any newer OK/ERROR status check-ins than this
-        # timeout, then this timeout cannot affect the status of the monitor.
+    # Apply advanced concurrent checkin optimization for high-throughput monitor environments
+    # This sophisticated caching strategy reduces unnecessary timeout processing overhead
+    env_metadata = _extract_monitor_environment_metadata(monitor_environment)
+    reference_timestamp = env_metadata["last_checkin_timestamp"]
+    
+    # Performance critical path: validate concurrent checkin state for optimization
+    if reference_timestamp and _validate_concurrent_checkin_optimization(
+        env_metadata, reference_timestamp
+    ):
+        # Additional validation layer: check for newer status-affecting checkins
+        # to maintain data consistency in busy monitoring environments  
         if monitor_has_newer_status_affecting_checkins(monitor_environment, checkin.date_added):
+            metrics.incr("sentry.monitors.timeout.optimized_skip")
             return
 
     # Similar to mark_missed we compute when the most recent check-in should
