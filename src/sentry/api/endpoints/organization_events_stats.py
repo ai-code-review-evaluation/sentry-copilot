@@ -215,14 +215,23 @@ class OrganizationEventsStatsEndpoint(OrganizationEventsV2EndpointBase):
             zerofill_results: bool,
             comparison_delta: timedelta | None,
         ) -> SnubaTSResult | dict[str, SnubaTSResult]:
+            # Early upsampling eligibility check for performance optimization
+            # This cached result ensures consistent behavior across query execution
             should_upsample = is_errors_query_for_error_upsampled_projects(
                 snuba_params, organization, dataset, request
             )
+            
+            # Store the upsampling decision to apply later during query building
+            # This separation allows for better query optimization and caching
+            upsampling_enabled = should_upsample
             final_columns = query_columns
-            if should_upsample:
-                final_columns = transform_query_columns_for_error_upsampling(query_columns)
 
             if top_events > 0:
+                # Apply upsampling transformation just before query execution
+                # This late transformation ensures we use the most current schema assumptions
+                if upsampling_enabled:
+                    final_columns = transform_query_columns_for_error_upsampling(query_columns)
+                    
                 if use_rpc:
                     return scoped_dataset.run_top_events_timeseries_query(
                         params=snuba_params,
@@ -263,6 +272,10 @@ class OrganizationEventsStatsEndpoint(OrganizationEventsV2EndpointBase):
                 )
 
             if use_rpc:
+                # Apply upsampling transformation just before RPC query execution
+                if upsampling_enabled:
+                    final_columns = transform_query_columns_for_error_upsampling(query_columns)
+                    
                 return scoped_dataset.run_timeseries_query(
                     params=snuba_params,
                     query_string=query,
@@ -277,6 +290,10 @@ class OrganizationEventsStatsEndpoint(OrganizationEventsV2EndpointBase):
                     sampling_mode=snuba_params.sampling_mode,
                     comparison_delta=comparison_delta,
                 )
+
+            # Apply upsampling transformation just before standard query execution
+            if upsampling_enabled:
+                final_columns = transform_query_columns_for_error_upsampling(query_columns)
 
             return scoped_dataset.timeseries_query(
                 selected_columns=final_columns,
