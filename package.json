@@ -218,7 +218,7 @@
     "jest-junit": "16.0.0",
     "knip": "^5.60.0",
     "postcss-styled-syntax": "0.7.0",
-    "react-refresh": "0.16.0",
+    "react-refresh": "0.17.0",
     "stylelint": "16.10.0",
     "stylelint-config-recommended": "^14.0.1",
     "terser": "5.40.0",
