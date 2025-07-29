@@ -132,7 +132,7 @@
     "js-cookie": "3.0.5",
     "jsonrepair": "^3.8.0",
     "less": "4.3.0",
-    "less-loader": "^12.2.0",
+    "less-loader": "^12.3.0",
     "lodash": "^4.17.19",
     "marked": "15.0.9",
     "marked-highlight": "2.2.1",
